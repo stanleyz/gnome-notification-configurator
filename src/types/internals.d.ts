@@ -35,11 +35,28 @@ declare module "resource:///org/gnome/shell/ui/notificationDaemon.js" {
   }
 }
 
+declare module "resource:///org/gnome/shell/ui/messageList.js" {
+  export * from "@girs/gnome-shell/ui/messageList";
+  import type St from "gi://St";
+  import type { Notification } from "resource:///org/gnome/shell/ui/messageTray.js";
+
+  export class NotificationMessage extends St.Button {
+    constructor(notification: Notification);
+    can_focus: boolean;
+    add_style_class_name(name: string): void;
+    destroy(): void;
+  }
+}
+
 declare module "resource:///org/gnome/shell/ui/messageTray.js" {
   export * from "@girs/gnome-shell/ui/messageTray";
   import type { Urgency } from "@girs/gnome-shell/ui/messageTray";
 
   export type MessageTrayProto = {
+    _onNotificationRequestBanner: (
+      source: Source,
+      notification: Notification,
+    ) => void;
     _updateNotificationTimeout: (timeout: number) => void;
     _updateState: () => void;
     _showNotification: () => void;
@@ -54,7 +71,10 @@ declare module "resource:///org/gnome/shell/ui/messageTray.js" {
     _bannerBin: import("gi://St").default.Widget & {
       ease: (params: Record<string, unknown>) => void;
     };
+    _notification: Notification | null;
     _notificationState: number;
+    hide: () => void;
+    show: () => void;
   };
 
   export type NotificationProto = {

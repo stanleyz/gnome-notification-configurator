@@ -15,10 +15,10 @@ type NotificationContainer = St.Widget & {
 export type NotificationWidgets = {
   container: St.Widget;
   sourceText: Clutter.Text | null;
-  source: St.Bin | null;
-  time: St.Bin | null;
-  title: St.Bin | null;
-  body: St.Bin | null;
+  source: St.Widget | null;
+  time: St.Widget | null;
+  title: St.Widget | null;
+  body: St.Widget | null;
   sourceName: string;
   titleText: string;
   bodyText: string;
@@ -77,32 +77,82 @@ function readText(actor: Clutter.Actor | null | undefined) {
   return (actor as Clutter.Text | null)?.text ?? "";
 }
 
+function findWidgetByStyleClass(
+  root: St.Widget,
+  className: string,
+): St.Widget | null {
+  if (root.has_style_class_name?.(className)) {
+    return root;
+  }
+
+  const children = root.get_children?.() ?? [];
+  for (const child of children) {
+    const found = findWidgetByStyleClass(child as St.Widget, className);
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
 export function resolveNotificationWidgets(
   messageTrayContainer: Clutter.Actor | null | undefined,
 ): NotificationWidgets | null {
   const container = messageTrayContainer?.get_first_child() as St.Widget | null;
   if (!container) return null;
 
-  const notification = container.get_first_child();
+  const notification = container.get_first_child() as St.Widget | null;
+  if (!notification) return null;
+  return resolveNotificationWidgetsFrom(container, notification);
+}
+
+export function resolveNotificationWidgetsFromBanner(
+  banner: St.Widget | null | undefined,
+): NotificationWidgets | null {
+  if (!banner) return null;
+  return resolveNotificationWidgetsFrom(banner, banner);
+}
+
+function resolveNotificationWidgetsFrom(
+  container: St.Widget,
+  notification: St.Widget,
+): NotificationWidgets | null {
   const header =
-    notification?.get_first_child() !== notification?.get_last_child()
-      ? notification?.get_first_child()
+    notification.get_first_child() !== notification.get_last_child()
+      ? (notification.get_first_child() as St.Widget | null)
       : null;
   const headerContent = header?.get_child_at_index(1) as St.BoxLayout | null;
-  const source = headerContent?.get_child_at_index(0) as St.Bin | null;
+  const source = headerContent?.get_child_at_index(0) as St.Widget | null;
   const sourceText = source?.get_first_child() as Clutter.Text | null;
-  const time = headerContent?.get_child_at_index(1) as St.Bin | null;
-  const content = notification?.get_last_child();
+  const time = headerContent?.get_child_at_index(1) as St.Widget | null;
+  const content = notification.get_last_child() as St.Widget | null;
   const contentBody = content?.get_child_at_index(1) as St.BoxLayout | null;
-  const title = contentBody?.get_child_at_index(0) as St.Bin | null;
-  const body = contentBody?.get_child_at_index(1) as St.Bin | null;
+  const title = contentBody?.get_child_at_index(0) as St.Widget | null;
+  const body = contentBody?.get_child_at_index(1) as St.Widget | null;
   const metadata = getNotificationMetadata(container);
 
-  const sourceName = sourceText?.text ?? metadata?.sourceName ?? "";
+  const sourceByClass = findWidgetByStyleClass(
+    notification,
+    "message-source-title",
+  );
+  const timeByClass = findWidgetByStyleClass(notification, "event-time");
+  const titleByClass = findWidgetByStyleClass(notification, "message-title");
+  const bodyByClass = findWidgetByStyleClass(notification, "message-body");
+  const sourceLabel = sourceByClass ?? source;
+  const timeLabel = timeByClass ?? time;
+  const titleLabel = titleByClass ?? title;
+  const bodyLabel = bodyByClass ?? body;
+
+  const sourceName =
+    readText(sourceLabel?.get_first_child()) ||
+    sourceText?.text ||
+    metadata?.sourceName ||
+    "";
   const titleText =
-    readText(title?.get_first_child()) || metadata?.titleText || "";
+    readText(titleLabel?.get_first_child()) || metadata?.titleText || "";
   const bodyText =
-    readText(body?.get_first_child()) || metadata?.bodyText || "";
+    readText(bodyLabel?.get_first_child()) || metadata?.bodyText || "";
 
   setNotificationMetadata(container, {
     sourceName,
@@ -113,10 +163,10 @@ export function resolveNotificationWidgets(
   return {
     container,
     sourceText,
-    source,
-    time,
-    title,
-    body,
+    source: sourceLabel,
+    time: timeLabel,
+    title: titleLabel,
+    body: bodyLabel,
     sourceName,
     titleText,
     bodyText,

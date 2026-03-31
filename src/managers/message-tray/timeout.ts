@@ -10,6 +10,10 @@ export class TimeoutAdapter {
     const settingsManager = this.settingsManager;
 
     return (_original, timeout) => {
+      if (!settingsManager.timeoutOverrideEnabled) {
+        return timeout;
+      }
+
       if (timeout !== null && timeout > 0) {
         return settingsManager.notificationTimeout > 0
           ? settingsManager.notificationTimeout

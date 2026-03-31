@@ -229,6 +229,10 @@ export class SettingsManager {
     return this._notificationTimeout;
   }
 
+  get timeoutOverrideEnabled() {
+    return this._globalConfiguration.timeout.enabled;
+  }
+
   get ignoreIdle() {
     return this._ignoreIdle;
   }
