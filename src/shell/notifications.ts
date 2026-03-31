@@ -2,6 +2,7 @@ import Clutter from "gi://Clutter";
 import GLib from "gi://GLib";
 import St from "gi://St";
 import { InjectionManager } from "resource:///org/gnome/shell/extensions/extension.js";
+import * as Layout from "resource:///org/gnome/shell/ui/layout.js";
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
 import * as MessageList from "resource:///org/gnome/shell/ui/messageList.js";
 import * as MessageTray from "resource:///org/gnome/shell/ui/messageTray.js";
@@ -74,6 +75,10 @@ export class NotificationsManager {
     MessageTray.Notification,
     MessageList.NotificationMessage
   >();
+  private monitorConstraint?: Layout.MonitorConstraint;
+  private focusWindowSignalId?: number;
+  private monitorsChangedSignalId?: number;
+  private lastActiveMonitorIndex: number = Main.layoutManager.primaryIndex;
 
   private static readonly HORIZONTAL_ALIGNMENT_MAP: Record<
     Position,
@@ -140,6 +145,90 @@ export class NotificationsManager {
     for (const child of children) {
       bannerBin.remove_child(child);
     }
+  }
+
+  private resolveMonitorConstraint() {
+    if (this.monitorConstraint) {
+      return this.monitorConstraint;
+    }
+
+    const constraints = Main.messageTray.get_constraints();
+    for (const constraint of constraints) {
+      if (constraint instanceof Layout.MonitorConstraint) {
+        this.monitorConstraint = constraint;
+        return constraint;
+      }
+    }
+
+    const constraint = new Layout.MonitorConstraint({
+      primary: true,
+      workArea: true,
+    });
+    Main.messageTray.add_constraint(constraint);
+    this.monitorConstraint = constraint;
+    return constraint;
+  }
+
+  private getActiveMonitorIndex() {
+    const focusWindow = global.display.focus_window;
+    if (focusWindow) {
+      return focusWindow.get_monitor();
+    }
+
+    return Main.layoutManager.primaryIndex;
+  }
+
+  private updateActiveMonitorConstraint(monitorIndex: number) {
+    const constraint = this.resolveMonitorConstraint();
+    if (monitorIndex < 0) {
+      constraint.primary = true;
+      return;
+    }
+
+    constraint.primary = false;
+    constraint.index = monitorIndex;
+  }
+
+  private updateActiveMonitorConstraintFromFocus() {
+    const monitorIndex = this.getActiveMonitorIndex();
+    if (monitorIndex < 0) {
+      return;
+    }
+
+    this.lastActiveMonitorIndex = monitorIndex;
+    this.updateActiveMonitorConstraint(monitorIndex);
+  }
+
+  private updateActiveMonitorConstraintForNotification() {
+    const monitorCount = Main.layoutManager.monitors.length;
+    if (monitorCount === 0) {
+      this.updateActiveMonitorConstraint(Main.layoutManager.primaryIndex);
+      return;
+    }
+
+    const index = Math.min(
+      Math.max(this.lastActiveMonitorIndex, 0),
+      monitorCount - 1,
+    );
+    this.updateActiveMonitorConstraint(index);
+  }
+
+  private connectMonitorTracking() {
+    this.updateActiveMonitorConstraintForNotification();
+
+    this.focusWindowSignalId = global.display.connect(
+      "notify::focus-window",
+      () => {
+        this.updateActiveMonitorConstraintFromFocus();
+      },
+    );
+
+    this.monitorsChangedSignalId = Main.layoutManager.connect(
+      "monitors-changed",
+      () => {
+        this.updateActiveMonitorConstraintForNotification();
+      },
+    );
   }
 
   private makeColorStyle(
@@ -296,6 +385,8 @@ export class NotificationsManager {
             return original.call(this, source, notification);
           }
 
+          self.updateActiveMonitorConstraintForNotification();
+
           if (notification.acknowledged) {
             return;
           }
@@ -329,6 +420,12 @@ export class NotificationsManager {
           const banner = new MessageList.NotificationMessage(notification);
           banner.can_focus = false;
           banner.add_style_class_name("notification-banner");
+          banner.connect("enter-event", () => {
+            banner.expand(true);
+          });
+          banner.connect("leave-event", () => {
+            banner.unexpand(true);
+          });
 
           self.ensureStackContainerAttached(bannerBin);
 
@@ -456,6 +553,7 @@ export class NotificationsManager {
     });
 
     this.patchAnimations();
+    this.connectMonitorTracking();
 
     const messageTrayContainer = getMessageTrayContainer();
     this.positionSignalId = messageTrayContainer?.connect("child-added", () => {
@@ -490,6 +588,16 @@ export class NotificationsManager {
     if (typeof this.positionSignalId === "number") {
       getMessageTrayContainer()?.disconnect(this.positionSignalId);
       this.positionSignalId = undefined;
+    }
+
+    if (typeof this.focusWindowSignalId === "number") {
+      global.display.disconnect(this.focusWindowSignalId);
+      this.focusWindowSignalId = undefined;
+    }
+
+    if (typeof this.monitorsChangedSignalId === "number") {
+      Main.layoutManager.disconnect(this.monitorsChangedSignalId);
+      this.monitorsChangedSignalId = undefined;
     }
 
     this.fullscreenAdapter.dispose();

@@ -44,6 +44,8 @@ declare module "resource:///org/gnome/shell/ui/messageList.js" {
     constructor(notification: Notification);
     can_focus: boolean;
     add_style_class_name(name: string): void;
+    expand(animate: boolean): void;
+    unexpand(animate: boolean): void;
     destroy(): void;
   }
 }
