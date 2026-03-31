@@ -197,6 +197,21 @@ export class NotificationsManager {
 
     this.lastActiveMonitorIndex = monitorIndex;
     this.updateActiveMonitorConstraint(monitorIndex);
+    this.moveExistingNotificationsToActiveMonitor();
+  }
+
+  private moveExistingNotificationsToActiveMonitor() {
+    const monitorCount = Main.layoutManager.monitors.length;
+    if (monitorCount === 0) {
+      return;
+    }
+
+    const index = Math.min(
+      Math.max(this.lastActiveMonitorIndex, 0),
+      monitorCount - 1,
+    );
+    this.updateActiveMonitorConstraint(index);
+    Main.messageTray.queue_relayout();
   }
 
   private updateActiveMonitorConstraintForNotification() {
