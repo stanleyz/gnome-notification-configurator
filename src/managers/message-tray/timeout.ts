@@ -16,7 +16,7 @@ export class TimeoutAdapter {
 
       if (timeout !== null && timeout > 0) {
         return settingsManager.notificationTimeout > 0
-          ? settingsManager.notificationTimeout
+          ? settingsManager.notificationTimeout * 1000
           : null;
       }
 

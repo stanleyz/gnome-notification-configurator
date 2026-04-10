@@ -45,6 +45,9 @@ export type Configuration = {
   urgency: {
     alwaysNormalUrgency: boolean;
   };
+  dismissals: {
+    ignoreAppRequested: boolean;
+  };
   display: {
     enableFullscreen: boolean;
     notificationPosition: Position;
@@ -68,6 +71,7 @@ export type PatternOverrides = {
   rateLimiting: boolean;
   timeout: boolean;
   urgency: boolean;
+  dismissals: boolean;
   display: boolean;
   colors: boolean;
   margins: boolean;
@@ -99,6 +103,19 @@ type SettingsEvents = {
   alwaysNormalUrgencyChanged: [boolean];
 };
 
+const DEFAULT_NOTIFICATION_TIMEOUT_SECONDS = 4;
+const LEGACY_NOTIFICATION_TIMEOUT_MS_MAX = 300;
+
+function normalizeNotificationTimeoutSeconds(value: unknown): number {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return DEFAULT_NOTIFICATION_TIMEOUT_SECONDS;
+  }
+  if (value > LEGACY_NOTIFICATION_TIMEOUT_MS_MAX) {
+    return Math.round(value / 1000);
+  }
+  return value;
+}
+
 export class SettingsManager {
   private settings: Gio.Settings;
   private settingSignals: number[] = [];
@@ -108,7 +125,7 @@ export class SettingsManager {
   private _filteringEnabled = false;
   private _fullscreenEnabled = false;
   private _notificationThreshold = 5000;
-  private _notificationTimeout = 4000;
+  private _notificationTimeout = DEFAULT_NOTIFICATION_TIMEOUT_SECONDS;
   private _ignoreIdle = true;
   private _alwaysNormalUrgency = false;
   private _globalConfiguration: GlobalConfiguration =
@@ -133,11 +150,14 @@ export class SettingsManager {
       },
       timeout: {
         enabled: true,
-        notificationTimeout: 4000,
+        notificationTimeout: DEFAULT_NOTIFICATION_TIMEOUT_SECONDS,
         ignoreIdle: true,
       },
       urgency: {
         alwaysNormalUrgency: false,
+      },
+      dismissals: {
+        ignoreAppRequested: false,
       },
       display: {
         enableFullscreen: false,
@@ -172,6 +192,7 @@ export class SettingsManager {
         rateLimiting: false,
         timeout: false,
         urgency: false,
+        dismissals: false,
         display: false,
         colors: false,
         margins: false,
@@ -184,10 +205,11 @@ export class SettingsManager {
       },
       timeout: {
         enabled: false,
-        notificationTimeout: 4000,
+        notificationTimeout: DEFAULT_NOTIFICATION_TIMEOUT_SECONDS,
         ignoreIdle: true,
       },
       urgency: { alwaysNormalUrgency: false },
+      dismissals: { ignoreAppRequested: false },
       display: {
         enableFullscreen: false,
         notificationPosition: "center",
@@ -239,6 +261,26 @@ export class SettingsManager {
 
   get alwaysNormalUrgency() {
     return this._alwaysNormalUrgency;
+  }
+
+  shouldIgnoreAppRequestedDismissalsFor(
+    source?: string,
+    title?: string,
+    body?: string,
+  ): boolean {
+    if (source === undefined || title === undefined || body === undefined) {
+      return this._globalConfiguration.dismissals.ignoreAppRequested;
+    }
+    const pattern = this.findPatternBy(
+      source,
+      title,
+      body,
+      (candidate) => candidate.overrides.dismissals,
+    );
+    return (
+      pattern?.dismissals.ignoreAppRequested ??
+      this._globalConfiguration.dismissals.ignoreAppRequested
+    );
   }
 
   get notificationPosition() {
@@ -373,6 +415,9 @@ export class SettingsManager {
       urgency: overrides.urgency
         ? matchedPattern.urgency
         : this._globalConfiguration.urgency,
+      dismissals: overrides.dismissals
+        ? matchedPattern.dismissals
+        : this._globalConfiguration.dismissals,
       display: overrides.display
         ? matchedPattern.display
         : this._globalConfiguration.display,
@@ -475,10 +520,9 @@ export class SettingsManager {
             typeof parsed.timeout?.enabled === "boolean"
               ? parsed.timeout.enabled
               : true,
-          notificationTimeout:
-            typeof parsed.timeout?.notificationTimeout === "number"
-              ? parsed.timeout.notificationTimeout
-              : 4000,
+          notificationTimeout: normalizeNotificationTimeoutSeconds(
+            parsed.timeout?.notificationTimeout,
+          ),
           ignoreIdle:
             typeof parsed.timeout?.ignoreIdle === "boolean"
               ? parsed.timeout.ignoreIdle
@@ -488,6 +532,12 @@ export class SettingsManager {
           alwaysNormalUrgency:
             typeof parsed.urgency?.alwaysNormalUrgency === "boolean"
               ? parsed.urgency.alwaysNormalUrgency
+              : false,
+        },
+        dismissals: {
+          ignoreAppRequested:
+            typeof parsed.dismissals?.ignoreAppRequested === "boolean"
+              ? parsed.dismissals.ignoreAppRequested
               : false,
         },
         display: {
@@ -570,6 +620,10 @@ export class SettingsManager {
           typeof object.overrides?.urgency === "boolean"
             ? object.overrides.urgency
             : false,
+        dismissals:
+          typeof object.overrides?.dismissals === "boolean"
+            ? object.overrides.dismissals
+            : false,
         display:
           typeof object.overrides?.display === "boolean"
             ? object.overrides.display
@@ -599,10 +653,9 @@ export class SettingsManager {
           typeof object.timeout?.enabled === "boolean"
             ? object.timeout.enabled
             : false,
-        notificationTimeout:
-          typeof object.timeout?.notificationTimeout === "number"
-            ? object.timeout.notificationTimeout
-            : 4000,
+        notificationTimeout: normalizeNotificationTimeoutSeconds(
+          object.timeout?.notificationTimeout,
+        ),
         ignoreIdle:
           typeof object.timeout?.ignoreIdle === "boolean"
             ? object.timeout.ignoreIdle
@@ -612,6 +665,12 @@ export class SettingsManager {
         alwaysNormalUrgency:
           typeof object.urgency?.alwaysNormalUrgency === "boolean"
             ? object.urgency.alwaysNormalUrgency
+            : false,
+      },
+      dismissals: {
+        ignoreAppRequested:
+          typeof object.dismissals?.ignoreAppRequested === "boolean"
+            ? object.dismissals.ignoreAppRequested
             : false,
       },
       display: {

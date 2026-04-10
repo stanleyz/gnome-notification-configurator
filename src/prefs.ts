@@ -468,13 +468,13 @@ export default class NotificationConfiguratorPreferences extends ExtensionPrefer
     const timeoutRow = new Adw.SpinRow({
       title: _("Timeout Duration"),
       subtitle: _(
-        "Time in milliseconds before auto-dismiss (0 = never dismiss)",
+        "Time in seconds before auto-dismiss (0 = never dismiss)",
       ),
       adjustment: new Gtk.Adjustment({
         lower: 0,
-        upper: 30000,
-        step_increment: 500,
-        page_increment: 1000,
+        upper: 120,
+        step_increment: 1,
+        page_increment: 5,
         value: config.timeout.notificationTimeout,
       }),
     });
@@ -558,6 +558,39 @@ export default class NotificationConfiguratorPreferences extends ExtensionPrefer
 
     urgencyGroup.add(forceNormalRow);
     updateUrgencyVisibility();
+
+    const dismissalsGroup = new Adw.PreferencesGroup({
+      title: _("Dismissals"),
+    });
+    page.add(dismissalsGroup);
+
+    const ignoreAppDismissalsRow = new Adw.SwitchRow({
+      title: _("Ignore App-Requested Dismissals"),
+      subtitle: _("Keep notifications visible when apps request closing them"),
+    });
+    ignoreAppDismissalsRow.set_active(config.dismissals.ignoreAppRequested);
+    ignoreAppDismissalsRow.connect("notify::active", () => {
+      config.dismissals.ignoreAppRequested =
+        ignoreAppDismissalsRow.get_active();
+      onSave();
+    });
+
+    const updateDismissalsVisibility = () => {
+      ignoreAppDismissalsRow.set_visible(!overrides || overrides.dismissals);
+    };
+
+    if (overrides) {
+      this.addOverrideRow(
+        dismissalsGroup,
+        overrides,
+        "dismissals",
+        onSave,
+        updateDismissalsVisibility,
+      );
+    }
+
+    dismissalsGroup.add(ignoreAppDismissalsRow);
+    updateDismissalsVisibility();
 
     const displayGroup = new Adw.PreferencesGroup({
       title: _("Display"),
@@ -984,7 +1017,8 @@ export default class NotificationConfiguratorPreferences extends ExtensionPrefer
       );
       proc.wait_async(null, null);
     } catch (error) {
-      console.error("Failed to send notification:", error);
+      const failure = error instanceof Error ? error : new Error(String(error));
+      logError(failure, "Failed to send notification:");
     }
   }
 }

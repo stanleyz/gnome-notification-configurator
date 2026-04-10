@@ -90,11 +90,16 @@ function createGlobalConfiguration(
     },
     timeout: {
       enabled: true,
-      notificationTimeout: oldSettings.get_int("notification-timeout"),
+      notificationTimeout: Math.round(
+        oldSettings.get_int("notification-timeout") / 1000,
+      ),
       ignoreIdle: oldSettings.get_boolean("ignore-idle"),
     },
     urgency: {
       alwaysNormalUrgency: oldSettings.get_boolean("always-normal-urgency"),
+    },
+    dismissals: {
+      ignoreAppRequested: oldSettings.get_boolean("ignore-app-requested-dismissals"),
     },
     display: {
       enableFullscreen: oldSettings.get_boolean("enable-fullscreen"),

@@ -34,6 +34,19 @@ import {
 } from "./notification-widgets.js";
 
 const ANIMATION_TIME = 200;
+const DEFAULT_NOTIFICATION_TIMEOUT_MS = 4000;
+
+type StackedBannerEntry = {
+  banner: MessageList.NotificationMessage;
+  timeoutId: number | null;
+};
+
+type TimeLabelWidget = St.Widget & {
+  datetime?: GLib.DateTime | null;
+  text?: string;
+  set_text?: (text: string) => void;
+  _updateText?: () => void;
+};
 
 export class NotificationsManager {
   private settingsManager: SettingsManager;
@@ -71,9 +84,9 @@ export class NotificationsManager {
   private positionSignalId?: number;
   private injectionManager = new InjectionManager();
   private stackedNotifications?: St.BoxLayout;
-  private stackedNotificationMap = new WeakMap<
+  private stackedNotificationBanners = new WeakMap<
     MessageTray.Notification,
-    MessageList.NotificationMessage
+    StackedBannerEntry[]
   >();
   private monitorConstraint?: Layout.MonitorConstraint;
   private focusWindowSignalId?: number;
@@ -108,10 +121,7 @@ export class NotificationsManager {
   }
 
   private shouldStackNotifications() {
-    return (
-      this.settingsManager.timeoutOverrideEnabled &&
-      this.settingsManager.notificationTimeout === 0
-    );
+    return true;
   }
 
   private getStackedNotificationsContainer() {
@@ -279,6 +289,28 @@ export class NotificationsManager {
     return `${colorStyle} ${fontSizeStyle}`;
   }
 
+  private resolveNotificationTimeoutMs(notification: MessageTray.Notification) {
+    const sourceName = notification.source?.title ?? "UNK_SRC";
+    const titleText = notification.title ?? "";
+    const bodyText = notification.body ?? "";
+    const configuration = this.settingsManager.getConfigurationFor(
+      sourceName,
+      titleText,
+      bodyText,
+    );
+
+    if (!configuration.timeout.enabled) {
+      return DEFAULT_NOTIFICATION_TIMEOUT_MS;
+    }
+
+    const timeoutSeconds = configuration.timeout.notificationTimeout;
+    if (timeoutSeconds <= 0) {
+      return 0;
+    }
+
+    return Math.round(timeoutSeconds * 1000);
+  }
+
   private applyTheme(widgets: NotificationWidgets) {
     if (!this.settingsManager.colorsEnabled) {
       return;
@@ -324,11 +356,48 @@ export class NotificationsManager {
     );
   }
 
+  private applyAbsoluteTimeLabel(
+    timeWidget: St.Widget | null,
+    notification: MessageTray.Notification | null,
+  ) {
+    if (!timeWidget || !notification) {
+      return;
+    }
+
+    if (!notification.datetime) {
+      notification.datetime = GLib.DateTime.new_now_local();
+    }
+
+    const timeLabel = timeWidget as TimeLabelWidget;
+    const updateText = () => {
+      const datetime = timeLabel.datetime ?? notification.datetime;
+      if (!datetime) {
+        return;
+      }
+      const formatted = datetime.format("%c") ?? "";
+      if (typeof timeLabel.set_text === "function") {
+        timeLabel.set_text(formatted);
+      } else {
+        timeLabel.text = formatted;
+      }
+    };
+
+    timeLabel._updateText = updateText;
+    updateText();
+  }
+
+
   private applyNotificationCustomizations(
     widgets: NotificationWidgets,
     bannerBin: St.Widget | null,
+    notification: MessageTray.Notification | null = null,
   ) {
     const { sourceName, titleText, bodyText } = widgets;
+    const configuration = this.settingsManager.getConfigurationFor(
+      sourceName,
+      titleText,
+      bodyText,
+    );
 
     const position = this.settingsManager.getPositionFor(
       sourceName,
@@ -364,6 +433,8 @@ export class NotificationsManager {
         return GLib.SOURCE_REMOVE;
       });
     }
+
+    this.applyAbsoluteTimeLabel(widgets.time, notification);
 
     this.applyTheme(widgets);
   }
@@ -402,10 +473,6 @@ export class NotificationsManager {
 
           self.updateActiveMonitorConstraintForNotification();
 
-          if (notification.acknowledged) {
-            return;
-          }
-
           if (notification.urgency === MessageTray.Urgency.LOW) {
             return;
           }
@@ -422,10 +489,8 @@ export class NotificationsManager {
             return;
           }
 
-          const existingBanner = self.stackedNotificationMap.get(notification);
-          if (existingBanner) {
-            return;
-          }
+          const existingEntries =
+            self.stackedNotificationBanners.get(notification);
 
           const bannerBin = getBannerBin();
           if (!bannerBin) {
@@ -450,22 +515,79 @@ export class NotificationsManager {
 
           const widgets = resolveNotificationWidgetsFromBanner(banner);
           if (widgets) {
-            self.applyNotificationCustomizations(widgets, bannerBin);
+            self.applyNotificationCustomizations(widgets, bannerBin, notification);
           }
 
-          self.stackedNotificationMap.set(notification, banner);
+          if (!existingEntries) {
+            notification.connect("destroy", () => {
+              const banners =
+                self.stackedNotificationBanners.get(notification) ?? [];
+              for (const entry of banners) {
+                if (entry.timeoutId !== null) {
+                  GLib.source_remove(entry.timeoutId);
+                }
+                entry.banner.destroy();
+              }
 
-          notification.connect("destroy", () => {
-            self.stackedNotificationMap.delete(notification);
-            banner.destroy();
+              self.stackedNotificationBanners.delete(notification);
+              if (stackedNotifications.get_n_children() === 0) {
+                self.detachStackContainer(bannerBin);
+                this._banner = null;
+                this._notification = null;
+                this.hide();
+              }
+            });
+          }
 
-            if (stackedNotifications.get_n_children() === 0) {
-              self.detachStackContainer(bannerBin);
-              this._banner = null;
-              this._notification = null;
-              this.hide();
-            }
+          const tray = this;
+          const timeoutMs = self.resolveNotificationTimeoutMs(notification);
+          let timeoutId: number | null = null;
+          if (timeoutMs > 0) {
+            timeoutId = GLib.timeout_add(
+              GLib.PRIORITY_DEFAULT,
+              timeoutMs,
+              () => {
+                const entries =
+                  self.stackedNotificationBanners.get(notification) ?? [];
+                const entryIndex = entries.findIndex(
+                  (entry) => entry.banner === banner,
+                );
+                if (entryIndex === -1) {
+                  return GLib.SOURCE_REMOVE;
+                }
+
+                entries.splice(entryIndex, 1);
+                banner.destroy();
+
+                if (entries.length === 0) {
+                  self.stackedNotificationBanners.delete(notification);
+                } else {
+                  self.stackedNotificationBanners.set(notification, entries);
+                }
+
+                if (tray._banner === banner) {
+                  tray._banner = null;
+                  tray._notification = null;
+                }
+
+                if (stackedNotifications.get_n_children() === 0) {
+                  self.detachStackContainer(bannerBin);
+                  tray._banner = null;
+                  tray._notification = null;
+                  tray.hide();
+                }
+
+                return GLib.SOURCE_REMOVE;
+              },
+            );
+          }
+
+          const nextEntries = existingEntries ?? [];
+          nextEntries.push({
+            banner,
+            timeoutId,
           });
+          self.stackedNotificationBanners.set(notification, nextEntries);
 
           this._notification = notification;
           this._banner = banner;
