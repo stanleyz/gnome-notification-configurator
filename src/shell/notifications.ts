@@ -36,8 +36,9 @@ import {
 const ANIMATION_TIME = 200;
 const DEFAULT_NOTIFICATION_TIMEOUT_MS = 4000;
 
-type StackedBannerEntry = {
+type StackedBanner = {
   banner: MessageList.NotificationMessage;
+  notification: MessageTray.Notification;
   timeoutId: number | null;
 };
 
@@ -79,15 +80,18 @@ export class NotificationsManager {
     this.setupPositioning(settingsManager);
 
     this.enable();
+    this.absorbPendingNotifications(this.tray);
   }
 
   private positionSignalId?: number;
   private injectionManager = new InjectionManager();
   private stackedNotifications?: St.BoxLayout;
-  private stackedNotificationBanners = new WeakMap<
+  private stackedBanners: StackedBanner[] = [];
+  private notificationDestroySignals = new Map<
     MessageTray.Notification,
-    StackedBannerEntry[]
+    number
   >();
+  private tray = Main.messageTray as unknown as MessageTray.MessageTrayProto;
   private monitorConstraint?: Layout.MonitorConstraint;
   private focusWindowSignalId?: number;
   private monitorsChangedSignalId?: number;
@@ -154,6 +158,195 @@ export class NotificationsManager {
     const children = bannerBin.get_children();
     for (const child of children) {
       bannerBin.remove_child(child);
+    }
+  }
+
+  private isStackedBanner(banner: MessageList.NotificationMessage) {
+    return this.stackedBanners.some((stacked) => stacked.banner === banner);
+  }
+
+  private resetBannerBinVisuals(tray: MessageTray.MessageTrayProto) {
+    tray._bannerBin.remove_all_transitions();
+    tray._bannerBin.opacity = 255;
+    tray._bannerBin.y = 0;
+    tray._bannerBin.scale_x = 1;
+    tray._bannerBin.scale_y = 1;
+  }
+
+  private resetTrayState(tray: MessageTray.MessageTrayProto) {
+    this.detachStackContainer(tray._bannerBin);
+    tray._banner = null;
+    tray._notification = null;
+    tray._notificationRemoved = false;
+    tray._pointerInNotification = false;
+    tray._notificationState = MessageTray.State.HIDDEN;
+    tray.hide();
+  }
+
+  private syncTrayState(tray: MessageTray.MessageTrayProto) {
+    const [top] = this.stackedBanners;
+    if (!top) {
+      this.resetTrayState(tray);
+      return;
+    }
+
+    tray._banner = top.banner;
+    tray._notification = top.notification;
+    tray._notificationRemoved = false;
+    tray._notificationState = MessageTray.State.SHOWN;
+  }
+
+  private releaseStackedBanner(stacked: StackedBanner) {
+    if (stacked.timeoutId !== null) {
+      GLib.source_remove(stacked.timeoutId);
+    }
+    stacked.banner.destroy();
+    this.stackedBanners = this.stackedBanners.filter(
+      (candidate) => candidate !== stacked,
+    );
+
+    const { notification } = stacked;
+    if (
+      this.stackedBanners.some(
+        (candidate) => candidate.notification === notification,
+      )
+    ) {
+      return;
+    }
+
+    const signalId = this.notificationDestroySignals.get(notification);
+    if (signalId !== undefined) {
+      notification.disconnect(signalId);
+      this.notificationDestroySignals.delete(notification);
+    }
+  }
+
+  private adoptNativeBanner(tray: MessageTray.MessageTrayProto) {
+    const { _banner: banner, _notification: notification } = tray;
+    if (
+      !banner ||
+      !notification ||
+      this.isStackedBanner(banner) ||
+      tray._notificationState === MessageTray.State.HIDING
+    ) {
+      return null;
+    }
+
+    tray._bannerBin.remove_all_transitions();
+    tray._notificationFocusGrabber.ungrabFocus();
+    banner.disconnectObject(tray);
+    tray._resetNotificationLeftTimeout();
+    tray._updateNotificationTimeout(0);
+    tray._notificationRemoved = true;
+    tray._notificationState = MessageTray.State.HIDDEN;
+    tray._hideNotificationCompleted();
+    this.resetBannerBinVisuals(tray);
+    return notification;
+  }
+
+  private absorbPendingNotifications(tray: MessageTray.MessageTrayProto) {
+    const adopted = this.adoptNativeBanner(tray);
+    const queued = tray._notificationQueue.splice(0);
+    if (queued.length > 0) {
+      tray.emit("queue-changed");
+    }
+
+    for (const notification of queued.reverse()) {
+      this.showStackedBanner(tray, notification);
+    }
+
+    if (adopted) {
+      this.showStackedBanner(tray, adopted);
+    }
+  }
+
+  private showStackedBanner(
+    tray: MessageTray.MessageTrayProto,
+    notification: MessageTray.Notification,
+  ) {
+    this.updateActiveMonitorConstraintForNotification();
+
+    if (notification.urgency === MessageTray.Urgency.LOW) {
+      return;
+    }
+
+    const notificationSource = notification.source;
+    if (!notificationSource) {
+      return;
+    }
+
+    if (
+      !notificationSource.policy.showBanners &&
+      notification.urgency !== MessageTray.Urgency.CRITICAL
+    ) {
+      return;
+    }
+
+    const bannerBin = tray._bannerBin;
+    const banner = new MessageList.NotificationMessage(notification);
+    banner.can_focus = false;
+    banner.add_style_class_name("notification-banner");
+    banner.connect("enter-event", () => {
+      banner.expand(true);
+    });
+    banner.connect("leave-event", () => {
+      banner.unexpand(true);
+    });
+
+    this.ensureStackContainerAttached(bannerBin);
+    this.resetBannerBinVisuals(tray);
+    this.getStackedNotificationsContainer().insert_child_at_index(banner, 0);
+
+    const widgets = resolveNotificationWidgetsFromBanner(banner);
+    if (widgets) {
+      this.applyNotificationCustomizations(widgets, bannerBin, notification);
+    }
+
+    if (!this.notificationDestroySignals.has(notification)) {
+      const signalId = notification.connect("destroy", () => {
+        const related = this.stackedBanners.filter(
+          (stacked) => stacked.notification === notification,
+        );
+        for (const stacked of related) {
+          this.releaseStackedBanner(stacked);
+        }
+        this.syncTrayState(tray);
+      });
+      this.notificationDestroySignals.set(notification, signalId);
+    }
+
+    const stacked: StackedBanner = { banner, notification, timeoutId: null };
+    const timeoutMs = this.resolveNotificationTimeoutMs(notification);
+    if (timeoutMs > 0) {
+      stacked.timeoutId = GLib.timeout_add(
+        GLib.PRIORITY_DEFAULT,
+        timeoutMs,
+        () => {
+          stacked.timeoutId = null;
+          this.releaseStackedBanner(stacked);
+          this.syncTrayState(tray);
+          return GLib.SOURCE_REMOVE;
+        },
+      );
+    }
+
+    this.stackedBanners.unshift(stacked);
+    this.syncTrayState(tray);
+    notification.acknowledged = true;
+    notification.playSound();
+    tray.show();
+  }
+
+  private clearStackedBanners(tray: MessageTray.MessageTrayProto) {
+    const ownsTray = !tray._banner || this.isStackedBanner(tray._banner);
+
+    for (const stacked of this.stackedBanners) {
+      this.releaseStackedBanner(stacked);
+    }
+
+    if (ownsTray) {
+      this.resetTrayState(tray);
+      this.resetBannerBinVisuals(tray);
     }
   }
 
@@ -451,6 +644,11 @@ export class NotificationsManager {
       "_showNotification",
       (original) =>
         function (this: MessageTray.MessageTrayProto) {
+          if (self.shouldStackNotifications()) {
+            self.absorbPendingNotifications(this);
+            return;
+          }
+
           original.call(this);
           if (!self.isVerticalAlignTop()) {
             this._bannerBin.y = 0;
@@ -462,139 +660,12 @@ export class NotificationsManager {
       proto,
       "_onNotificationRequestBanner",
       (original) =>
-        function (
-          this: MessageTray.MessageTrayProto,
-          source,
-          notification,
-        ) {
+        function (this: MessageTray.MessageTrayProto, source, notification) {
           if (!self.shouldStackNotifications()) {
             return original.call(this, source, notification);
           }
 
-          self.updateActiveMonitorConstraintForNotification();
-
-          if (notification.urgency === MessageTray.Urgency.LOW) {
-            return;
-          }
-
-          const notificationSource = notification.source;
-          if (!notificationSource) {
-            return;
-          }
-
-          if (
-            !notificationSource.policy.showBanners &&
-            notification.urgency !== MessageTray.Urgency.CRITICAL
-          ) {
-            return;
-          }
-
-          const existingEntries =
-            self.stackedNotificationBanners.get(notification);
-
-          const bannerBin = getBannerBin();
-          if (!bannerBin) {
-            return;
-          }
-
-          const banner = new MessageList.NotificationMessage(notification);
-          banner.can_focus = false;
-          banner.add_style_class_name("notification-banner");
-          banner.connect("enter-event", () => {
-            banner.expand(true);
-          });
-          banner.connect("leave-event", () => {
-            banner.unexpand(true);
-          });
-
-          self.ensureStackContainerAttached(bannerBin);
-
-          const stackedNotifications =
-            self.getStackedNotificationsContainer();
-          stackedNotifications.insert_child_at_index(banner, 0);
-
-          const widgets = resolveNotificationWidgetsFromBanner(banner);
-          if (widgets) {
-            self.applyNotificationCustomizations(widgets, bannerBin, notification);
-          }
-
-          if (!existingEntries) {
-            notification.connect("destroy", () => {
-              const banners =
-                self.stackedNotificationBanners.get(notification) ?? [];
-              for (const entry of banners) {
-                if (entry.timeoutId !== null) {
-                  GLib.source_remove(entry.timeoutId);
-                }
-                entry.banner.destroy();
-              }
-
-              self.stackedNotificationBanners.delete(notification);
-              if (stackedNotifications.get_n_children() === 0) {
-                self.detachStackContainer(bannerBin);
-                this._banner = null;
-                this._notification = null;
-                this.hide();
-              }
-            });
-          }
-
-          const tray = this;
-          const timeoutMs = self.resolveNotificationTimeoutMs(notification);
-          let timeoutId: number | null = null;
-          if (timeoutMs > 0) {
-            timeoutId = GLib.timeout_add(
-              GLib.PRIORITY_DEFAULT,
-              timeoutMs,
-              () => {
-                const entries =
-                  self.stackedNotificationBanners.get(notification) ?? [];
-                const entryIndex = entries.findIndex(
-                  (entry) => entry.banner === banner,
-                );
-                if (entryIndex === -1) {
-                  return GLib.SOURCE_REMOVE;
-                }
-
-                entries.splice(entryIndex, 1);
-                banner.destroy();
-
-                if (entries.length === 0) {
-                  self.stackedNotificationBanners.delete(notification);
-                } else {
-                  self.stackedNotificationBanners.set(notification, entries);
-                }
-
-                if (tray._banner === banner) {
-                  tray._banner = null;
-                  tray._notification = null;
-                }
-
-                if (stackedNotifications.get_n_children() === 0) {
-                  self.detachStackContainer(bannerBin);
-                  tray._banner = null;
-                  tray._notification = null;
-                  tray.hide();
-                }
-
-                return GLib.SOURCE_REMOVE;
-              },
-            );
-          }
-
-          const nextEntries = existingEntries ?? [];
-          nextEntries.push({
-            banner,
-            timeoutId,
-          });
-          self.stackedNotificationBanners.set(notification, nextEntries);
-
-          this._notification = notification;
-          this._banner = banner;
-          this._notificationState = MessageTray.State.SHOWN;
-          notification.acknowledged = true;
-          notification.playSound();
-          this.show();
+          self.showStackedBanner(this, notification);
         },
     );
 
@@ -633,7 +704,10 @@ export class NotificationsManager {
       "_hideNotification",
       (original) =>
         function (this: MessageTray.MessageTrayProto, animate) {
-          if (self.shouldStackNotifications()) {
+          if (
+            self.shouldStackNotifications() &&
+            (!this._banner || self.isStackedBanner(this._banner))
+          ) {
             return;
           }
 
@@ -715,12 +789,9 @@ export class NotificationsManager {
     this.disable();
     this.injectionManager.clear();
 
-    if (this.stackedNotifications) {
-      for (const child of this.stackedNotifications.get_children()) {
-        this.stackedNotifications.remove_child(child);
-      }
-      this.stackedNotifications = undefined;
-    }
+    this.clearStackedBanners(this.tray);
+    this.stackedNotifications?.destroy();
+    this.stackedNotifications = undefined;
 
     if (typeof this.positionSignalId === "number") {
       getMessageTrayContainer()?.disconnect(this.positionSignalId);

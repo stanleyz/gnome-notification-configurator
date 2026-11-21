@@ -74,7 +74,11 @@ declare module "resource:///org/gnome/shell/ui/messageTray.js" {
       ease: (params: Record<string, unknown>) => void;
     };
     _notification: Notification | null;
+    _notificationQueue: Notification[];
     _notificationState: number;
+    _notificationRemoved: boolean;
+    _pointerInNotification: boolean;
+    emit: (signal: string) => void;
     hide: () => void;
     show: () => void;
   };
